@@ -55,6 +55,9 @@ a{color:inherit}
   .set-grid{grid-template-columns:1fr}
   .set-side{position:static;order:2}
 }
+.stack{display:grid;gap:20px;align-content:start;min-width:0}
+.ord-r{text-align:right;min-width:0;max-width:52%}
+.ord-r .t1,.ord-r .t2{text-align:right}
 [hidden]{display:none!important}
 
 /* ---------- yerleşim ---------- */
@@ -219,7 +222,6 @@ select.inp{width:auto;padding:0 12px;height:40px}
 .sync-dot.pending{background:#b45309;animation:syncPulse 1s infinite}
 @keyframes syncPulse{0%{transform:scale(.92);opacity:.8}50%{transform:scale(1.2);opacity:1}100%{transform:scale(.92);opacity:.8}}
 
-
 /* ---------- masaüstü: ray ---------- */
 @media (min-width:901px){
   .shell{grid-template-columns:96px minmax(0,1fr)}
@@ -340,15 +342,16 @@ const initials = n => String(n || '?').trim().split(/\s+/).slice(0, 2).map(s => 
 const daysSince = d => Math.floor((Date.now() - new Date(d + 'T00:00:00').getTime()) / 86400000);
 
 /* ---------- veri ---------- */
-function blank(){ return {customers:[], transactions:[], products:[], settings:{name:'', phone:'', address:''}, _deleted:{customers:[], transactions:[], products:[]}, lastUpdated:Date.now()}; }
+function blank(){ return {customers:[], transactions:[], products:[], orders:[], settings:{name:'', phone:'', address:''}, _deleted:{customers:[], transactions:[], products:[], orders:[]}, lastUpdated:Date.now()}; }
 function normalize(d){
   d.settings = d.settings || {name:'', phone:'', address:''};
   d.products = Array.isArray(d.products) ? d.products : [];
-  d._deleted = d._deleted || {customers:[], transactions:[], products:[]};
+  d.orders = Array.isArray(d.orders) ? d.orders : [];
+  d._deleted = d._deleted || {customers:[], transactions:[], products:[], orders:[]};
   return d;
 }
 function trackDeletion(type, id){
-  db._deleted = db._deleted || {customers:[], transactions:[], products:[]};
+  db._deleted = db._deleted || {customers:[], transactions:[], products:[], orders:[]};
   db._deleted[type] = db._deleted[type] || [];
   if(!db._deleted[type].includes(id)) db._deleted[type].push(id);
 }
@@ -389,19 +392,21 @@ function getDefaultServerUrl(){
 }
 
 function mergeLocalAndRemote(local, remote){
-  if(!remote || (!remote.customers && !remote.transactions)) return local;
-  if(!local || (!local.customers && !local.transactions)) return remote;
+  if(!remote || (!remote.customers && !remote.transactions && !remote.orders)) return local;
+  if(!local || (!local.customers && !local.transactions && !local.orders)) return remote;
 
   const res = {
     settings: { ...(local.settings || {}), ...(remote.settings || {}) },
     _deleted: {
       customers: Array.from(new Set([...(local._deleted?.customers || []), ...(remote._deleted?.customers || [])])),
       transactions: Array.from(new Set([...(local._deleted?.transactions || []), ...(remote._deleted?.transactions || [])])),
-      products: Array.from(new Set([...(local._deleted?.products || []), ...(remote._deleted?.products || [])]))
+      products: Array.from(new Set([...(local._deleted?.products || []), ...(remote._deleted?.products || [])])),
+      orders: Array.from(new Set([...(local._deleted?.orders || []), ...(remote._deleted?.orders || [])]))
     },
     customers: [],
     transactions: [],
     products: [],
+    orders: [],
     lastUpdated: Math.max(local.lastUpdated || 0, remote.lastUpdated || 0, Date.now())
   };
 
@@ -431,6 +436,15 @@ function mergeLocalAndRemote(local, remote){
     if(!res._deleted.products.includes(p.id)) pMap.set(p.id, { ...(pMap.get(p.id) || {}), ...p });
   }
   res.products = Array.from(pMap.values());
+
+  const oMap = new Map();
+  for(const o of (local.orders || [])){
+    if(!res._deleted.orders.includes(o.id)) oMap.set(o.id, o);
+  }
+  for(const o of (remote.orders || [])){
+    if(!res._deleted.orders.includes(o.id)) oMap.set(o.id, { ...(oMap.get(o.id) || {}), ...o });
+  }
+  res.orders = Array.from(oMap.values());
 
   return res;
 }
@@ -602,7 +616,6 @@ class SyncEngine {
 }
 const syncEngine = new SyncEngine();
 
-
 /* ---------- hesap (kuruş cinsinden tam sayı) ---------- */
 const txsOf = cid => db.transactions.filter(t => t.customerId === cid);
 function balanceK(cid, exceptId){
@@ -631,6 +644,7 @@ function overdue(){
 
 /* ---------- simgeler ---------- */
 const ICON = {
+  clip:'<rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1"/><path d="M9 12h6M9 16h4"/>',
   home:'<path d="M3 10.5 12 3l9 7.5V21h-6v-6H9v6H3z"/>',
   users:'<circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0"/><path d="M16 4a4 4 0 0 1 0 8M22 21a7 7 0 0 0-4-6.3"/>',
   box:'<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="M3 8l9 5 9-5M12 13v8"/>',
@@ -695,7 +709,7 @@ function segSlide(){
 }
 function render(){
   if(ui.view === 'customer' && !db.customers.some(c => c.id === ui.cid)) ui.view = 'customers';
-  const views = {home:viewHome, customers:viewCustomers, customer:viewCustomer, products:viewProducts, reports:viewReports, settings:viewSettings};
+  const views = {home:viewHome, customers:viewCustomers, customer:viewCustomer, orders:viewOrders, products:viewProducts, reports:viewReports, settings:viewSettings};
   const v = views[ui.view]();
   const syncBtn = typeof syncEngine !== 'undefined' ? `
     <button class="sync-pill" onclick="openSyncModal()" title="Canlı Senkronizasyon Durumu" id="sync-pill">
@@ -714,7 +728,7 @@ function render(){
 }
 function renderNav(){
   const cur = ui.view === 'customer' ? 'customers' : ui.view;
-  const items = [['home','home','Genel'],['customers','users','Müşteriler'],['products','box','Ürünler'],['reports','chart','Raporlar'],['settings','gear','Ayarlar']];
+  const items = [['home','home','Genel'],['customers','users','Müşteriler'],['orders','clip','Sipariş'],['products','box','Ürünler'],['reports','chart','Raporlar'],['settings','gear','Ayarlar']];
   $('#items').innerHTML = `<div class="rail-brand"><b>A</b><span>Azaklıoğlu</span></div>` + items.map(([k, i, l]) => `<button class="nb ${cur === k ? 'on' : ''}" onclick="go('${k}')">${svg(i)}<span>${l}</span></button>`).join('');
   moveInd(!$('#ind').dataset.ready);
   $('#ind').dataset.ready = '1';
@@ -772,6 +786,11 @@ function viewHome(){
         <div class="ph"><h3>Son hareketler</h3><button class="btn" onclick="go('customers')">Müşteriler</button></div>
         ${recent.length ? recent.map(t => txRowHTML(t, true)).join('') : emptyBox('Henüz hareket yok', 'Bir müşteri seçip veresiye ya da ödeme ekleyerek başlayın.')}
       </section>
+      <div class="stack">
+      <section class="card flat">
+        <div class="ph"><h3>Yaklaşan siparişler</h3><button class="btn" onclick="go('orders')">Tümü</button></div>
+        ${openOrders().length ? openOrders().slice(0, 5).map(orderRowHTML).join('') : emptyBox('Açık sipariş yok', 'Sipariş alınca teslim günü burada görünür.')}
+      </section>
       <section class="card flat">
         <div class="ph"><h3>Ödemesi gecikenler</h3><span class="hint">30 gündür ödeme yok</span></div>
         ${od.length ? od.map(x => `<div class="row click" onclick="go('customer','${x.c.id}')">
@@ -780,6 +799,7 @@ function viewHome(){
             <div class="amt red">${money(x.b / 100)}</div></div>`).join('')
           : emptyBox('Gecikmiş borç yok', 'Müşteriler düzenli ödüyor.')}
       </section>
+      </div>
     </div>`};
 }
 
@@ -872,7 +892,9 @@ function viewCustomer(){
       ${c.phone ? `<a class="btn" href="tel:${esc(c.phone)}">${svg('phone', 16)} Ara</a>
       <a class="btn" target="_blank" rel="noopener" href="${waLink(c, b)}">WhatsApp ile bakiye gönder</a>` : ''}
       <button class="btn" onclick="openSummary()">Borç özeti / yazdır</button>
+      <button class="btn" onclick="openOrderForm(null,'${c.id}')">Sipariş al</button>
     </div>
+    ${openOrders().some(o => o.customerId === c.id) ? `<div class="h2">Açık siparişler</div><div class="card flat">${openOrders().filter(o => o.customerId === c.id).map(orderRowHTML).join('')}</div>` : ''}
 
     <div class="h2">Hesap hareketleri</div>
     <div class="card flat">
@@ -917,6 +939,9 @@ function copyText(){
 }
 function deleteCustomer(id){
   if(!confirm('Bu müşteri ve tüm hesap hareketleri silinecek. Emin misiniz?')) return;
+  const deletedOrders = db.orders.filter(o => o.customerId === id);
+  deletedOrders.forEach(o => trackDeletion('orders', o.id));
+  db.orders = db.orders.filter(o => o.customerId !== id);
   const c = db.customers.find(x => x.id === id);
   const ts = txsOf(id);
   trackDeletion('customers', id);
@@ -927,8 +952,10 @@ function deleteCustomer(id){
   toast('Müşteri silindi', () => {
     untrackDeletion('customers', id);
     ts.forEach(t => untrackDeletion('transactions', t.id));
+    deletedOrders.forEach(o => untrackDeletion('orders', o.id));
     db.customers.push(c);
     db.transactions.push(...ts);
+    db.orders.push(...deletedOrders);
     save();
     render();
   });
@@ -1161,6 +1188,132 @@ function deleteProduct(id){
   save(); closeSheet(); render();
 }
 
+/* ---------- siparişler ---------- */
+const WD = ['Pazar','Pazartesi','Salı','Çarşamba','Perşembe','Cuma','Cumartesi'];
+const weekdayName = d => WD[new Date(d + 'T00:00:00').getDay()];
+function dayLabel(d){
+  if(d === ymd(new Date())) return `Bugün · ${fmtDate(d)}`;
+  if(d === ymdOffset(1)) return `Yarın · ${fmtDate(d)}`;
+  return `${weekdayName(d)} · ${fmtDate(d)}`;
+}
+function openOrders(){
+  return db.orders
+    .filter(o => o.status === 'open' && db.customers.some(c => c.id === o.customerId))
+    .sort((a, b) => a.deliveryDate.localeCompare(b.deliveryDate) || (a.createdAt || 0) - (b.createdAt || 0));
+}
+function orderRowHTML(o){
+  const c = db.customers.find(x => x.id === o.customerId);
+  if(!c) return '';
+  return `<div class="row click" onclick="openOrderMenu('${o.id}')">
+    <div class="av">${esc(initials(c.name))}</div>
+    <div class="grow"><div class="t1">${esc(c.name)}</div><div class="t2">${esc(o.note || c.phone || '')}</div></div>
+    <div class="ord-r"><div class="t1">${esc(o.product)} · ${o.qty} ${esc(o.unit || '')}</div><div class="t2">${dayLabel(o.deliveryDate)}</div></div>
+  </div>`;
+}
+function viewOrders(){
+  const open = openOrders();
+  const groups = {};
+  open.forEach(o => (groups[o.deliveryDate] ||= []).push(o));
+  const body = Object.keys(groups).sort().map(d =>
+    `<div class="h2">${dayLabel(d)}</div><div class="card flat">${groups[d].map(orderRowHTML).join('')}</div>`).join('');
+  const done = db.orders.filter(o => o.status === 'done' && db.customers.some(c => c.id === o.customerId))
+    .sort((a, b) => (b.doneAt || '').localeCompare(a.doneAt || '')).slice(0, 8);
+  return {
+    title:'Siparişler',
+    sub:`${open.length} açık sipariş`,
+    actions:`<button class="btn primary" onclick="openOrderForm()">+ Sipariş ekle</button>`,
+    html: (open.length ? body : `<div class="card flat" style="margin-top:8px">${emptyBox('Açık sipariş yok', 'Müşteri sipariş verdiğinde ürünü ve teslim gününü kaydedin.')}</div>`)
+      + (done.length ? `<div class="h2">Teslim edilenler</div><div class="card flat">${done.map(orderRowHTML).join('')}</div>` : '')
+  };
+}
+function openOrderMenu(id){
+  const o = db.orders.find(x => x.id === id);
+  const c = o && db.customers.find(x => x.id === o.customerId);
+  if(!o || !c) return;
+  const open = o.status === 'open';
+  openSheet(open ? 'Sipariş' : 'Teslim edilen sipariş', `<div class="card" style="padding:4px 16px">
+      ${kv('Müşteri', esc(c.name))}
+      ${kv('Ürün', `${esc(o.product)} · ${o.qty} ${esc(o.unit || '')}`)}
+      ${kv('Teslim', dayLabel(o.deliveryDate))}
+      ${o.price ? kv('Tutar', money(o.qty * o.price)) : ''}
+      ${o.note ? kv('Not', esc(o.note)) : ''}
+    </div>`,
+    open ? `<button class="btn danger" onclick="deleteOrder('${id}')">Sil</button>
+      <button class="btn" onclick="openOrderForm('${id}')">Düzenle</button>
+      <button class="btn pay" onclick="markOrderDone('${id}')">Teslim edildi</button>`
+    : `<button class="btn" onclick="closeSheet()">Kapat</button>`);
+}
+function openOrderForm(id, cid){
+  const o = id ? db.orders.find(x => x.id === id) : null;
+  const preC = o ? o.customerId : (cid || (db.customers[0] || {}).id || '');
+  const cur = o ? o.deliveryDate : ymdOffset(1);
+  const custOpts = [...db.customers].sort((a, b) => a.name.localeCompare(b.name, 'tr'))
+    .map(c => `<option value="${c.id}" ${c.id === preC ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+  const prodOpts = db.products.map(p => `<option value="${esc(p.name)}">`).join('');
+  const days = [0,1,2,3,4,5,6].map(i => {
+    const d = ymdOffset(i);
+    return `<button type="button" class="pill ${d === cur ? 'on' : ''}" data-d="${d}" onclick="setOrderDay('${d}')">${WD[new Date(d + 'T00:00:00').getDay()].slice(0, 3)} ${d.slice(8)}</button>`;
+  }).join('');
+  openSheet(o ? 'Siparişi düzenle' : 'Yeni sipariş', `
+    <label class="lbl">Müşteri</label>
+    <select class="inp" id="o-cid">${custOpts}</select>
+    <label class="lbl">Teslim günü</label>
+    <div class="pills" id="odays">${days}</div>
+    <input class="inp" type="date" id="o-date" value="${cur}" style="margin-top:8px">
+    <div class="frow">
+      <div><label class="lbl">Ürün</label><input class="inp" id="o-name" list="o-prods" value="${esc(o ? o.product : '')}" placeholder="Örn: Büyükbaş yem" oninput="fillOrderProduct()"><datalist id="o-prods">${prodOpts}</datalist></div>
+      <div><label class="lbl">Miktar</label><input class="inp" id="o-qty" inputmode="decimal" value="${o ? o.qty : ''}" placeholder="5"></div>
+    </div>
+    <div class="frow">
+      <div><label class="lbl">Birim</label><input class="inp" id="o-unit" value="${esc(o ? o.unit : '')}" placeholder="çuval, kg"></div>
+      <div><label class="lbl">Birim fiyat (₺) <span class="opt">isteğe bağlı</span></label><input class="inp" id="o-price" inputmode="decimal" value="${o && o.price ? o.price : ''}" placeholder="Teslimde yazılır"></div>
+    </div>
+    <label class="lbl">Not <span class="opt">isteğe bağlı</span></label>
+    <input class="inp" id="o-note" value="${esc(o ? o.note : '')}" placeholder="Örn: kapıya bırakılsın">
+    <div class="err" id="oerr"></div>`,
+    `<button class="btn" onclick="closeSheet()">Vazgeç</button>
+     <button class="btn primary" onclick="saveOrder('${id || ''}')">Siparişi kaydet</button>`);
+}
+function setOrderDay(d){
+  $('#o-date').value = d;
+  document.querySelectorAll('#odays .pill').forEach(b => b.classList.toggle('on', b.dataset.d === d));
+}
+function fillOrderProduct(){
+  const p = db.products.find(x => x.name.toLowerCase() === $('#o-name').value.trim().toLowerCase());
+  if(!p) return;
+  if(!$('#o-unit').value.trim()) $('#o-unit').value = p.unit || '';
+  if(!$('#o-price').value.trim()) $('#o-price').value = p.price || '';
+}
+function saveOrder(id){
+  const fail = m => { $('#oerr').textContent = m; };
+  const cid = $('#o-cid').value;
+  const name = $('#o-name').value.trim(), qty = num($('#o-qty').value), date = $('#o-date').value;
+  if(!db.customers.some(c => c.id === cid)) return fail('Müşteri seçin.');
+  if(!name) return fail('Ürün adını yazın.');
+  if(!(qty > 0)) return fail('Miktarı yazın (0\'dan büyük olmalı).');
+  if(!date) return fail('Teslim gününü seçin.');
+  const data = {customerId:cid, product:name, qty, unit:$('#o-unit').value.trim(), price:num($('#o-price').value), deliveryDate:date, note:$('#o-note').value.trim()};
+  if(id) Object.assign(db.orders.find(x => x.id === id), data);
+  else db.orders.push({id:uid(), ...data, status:'open', createdAt:Date.now()});
+  save(); closeSheet(); toast('Sipariş kaydedildi'); render();
+}
+function markOrderDone(id){
+  const o = db.orders.find(x => x.id === id);
+  if(!o) return;
+  if(!(o.price > 0)){ toast('Önce birim fiyatı girin'); openOrderForm(id); return; }
+  const today = ymd(new Date());
+  db.transactions.push({id:uid(), customerId:o.customerId, type:'debt', date:today, product:o.product, qty:o.qty, unit:o.unit || '', price:o.price,
+    kurus:Math.round(o.qty * o.price * 100), method:'', note:'Sipariş teslimi (' + fmtDate(o.deliveryDate) + ')', createdAt:Date.now()});
+  o.status = 'done'; o.doneAt = today;
+  save(); closeSheet(); toast('Teslim edildi, veresiyeye yazıldı'); render();
+}
+function deleteOrder(id){
+  if(!confirm('Bu sipariş silinsin mi?')) return;
+  trackDeletion('orders', id);
+  db.orders = db.orders.filter(x => x.id !== id);
+  save(); closeSheet(); render();
+}
+
 /* ---------- raporlar ---------- */
 function rangeOf(){
   const t = ymd(new Date());
@@ -1277,8 +1430,12 @@ function simSeed(){
   save(); toast('14 test müşterisi eklendi'); render();
 }
 function simClear(){
-  const ids = new Set(db.customers.filter(c => c.sim).map(c => c.id));
+  const simCusts = db.customers.filter(c => c.sim);
+  const ids = new Set(simCusts.map(c => c.id));
   if(!ids.size && !db.products.some(p => p.sim)) return toast('Silinecek test verisi yok');
+  simCusts.forEach(c => trackDeletion('customers', c.id));
+  db.transactions.filter(t => t.sim || ids.has(t.customerId)).forEach(t => trackDeletion('transactions', t.id));
+  db.products.filter(p => p.sim).forEach(p => trackDeletion('products', p.id));
   db.customers = db.customers.filter(c => !c.sim);
   db.transactions = db.transactions.filter(t => !t.sim && !ids.has(t.customerId));
   db.products = db.products.filter(p => !p.sim);
@@ -1395,11 +1552,16 @@ function importData(input){
 function resetAll(){
   if(!confirm('TÜM müşteri, ürün ve hareketler silinecek. Geri alınamaz. Emin misiniz?')) return;
   if(!confirm('Son kez soruyorum: her şey silinsin mi?')) return;
+  (db.customers || []).forEach(c => trackDeletion('customers', c.id));
+  (db.transactions || []).forEach(t => trackDeletion('transactions', t.id));
+  (db.products || []).forEach(p => trackDeletion('products', p.id));
+  (db.orders || []).forEach(o => trackDeletion('orders', o.id));
   db = blank();
   save();
   if(typeof syncEngine !== 'undefined') syncEngine.push(db);
   go('home'); toast('Tüm kayıtlar silindi');
 }
+
 
 function openSyncModal(){
   const isConn = syncEngine.status === 'connected';
@@ -1414,12 +1576,11 @@ function openSyncModal(){
       <div style="font-weight:600">Durum:</div>
       ${badge}
     </div>
-    <div style="background:var(--soft);padding:14px;border-radius:12px;margin-bottom:16px;font-size:13px;line-height:1.6">
-      <b style="display:block;margin-bottom:4px;font-size:14px">📱 Telefon ve Bilgisayar Eşitlemesi</b>
-      Telefonunuzdan veya bilgisayarınızdan yaptığınız tüm işlemler anında ortak sunucuda eşitlenir.
-    </div>
+    <p class="help" style="margin-bottom:12px">
+      Bu cihaz ile diğer cihazlarınızın (telefon, bilgisayar, tablet) aynı veritabanını ortak ve canlı kullanması için sunucu adresini girin.
+    </p>
 
-    <label class="lbl">Sunucu Adresi (URL)</label>
+    <label class="lbl">Sunucu Adresi (Wi-Fi veya Bulut Linki)</label>
     <div style="display:flex;gap:8px">
       <input class="inp" id="cfg-server-url" value="${esc(syncEngine.serverUrl)}" placeholder="http://192.168.1.198:3000">
       <button class="btn primary" onclick="applyServerUrl()" style="white-space:nowrap">Kaydet & Bağlan</button>
