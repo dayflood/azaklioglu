@@ -58,6 +58,19 @@ a{color:inherit}
 .stack{display:grid;gap:20px;align-content:start;min-width:0}
 .ord-r{text-align:right;min-width:0;max-width:52%}
 .ord-r .t1,.ord-r .t2{text-align:right}
+#print-root{display:none}
+@media print{
+  html,body{background:#fff!important}
+  .shell,#modal,.toast{display:none!important}
+  #print-root{display:block!important;color:#000;background:#fff;font-family:Arial,sans-serif}
+  #print-root h1{font-size:20px;margin:0 0 4px}
+  #print-root p{font-size:12px;margin:0 0 12px}
+  #print-root table{width:100%;border-collapse:collapse;font-size:12px}
+  #print-root th,#print-root td{border:1px solid #888;padding:7px;text-align:left;vertical-align:top}
+  #print-root th{background:#eee}
+  #print-root .ck{width:34px}
+  @page{margin:14mm}
+}
 [hidden]{display:none!important}
 
 /* ---------- yerleşim ---------- */
@@ -324,6 +337,7 @@ select.inp{width:auto;padding:0 12px;height:40px}
   <div class="welcome" id="welcome" hidden>Hoş geldiniz</div>
 </div>
 
+<div id="print-root"></div>
 <script>
 function getTheme(){ try{ return localStorage.getItem("azaklioglu-tema") || "system"; }catch(e){ return "system"; } }
 function applyTheme(t){ const th = t || getTheme(); if(th === "system") document.documentElement.removeAttribute("data-theme"); else document.documentElement.setAttribute("data-theme", th); }
@@ -1154,9 +1168,59 @@ function viewProducts(){
   return {
     title:'Ürünler',
     sub:`${db.products.length} ürün`,
-    actions:`<button class="btn primary" onclick="openProductForm()">+ Yeni ürün</button>`,
+    actions:`<button class="btn" onclick="openRepriceSheet()">Borçları güncelle</button> <button class="btn primary" onclick="openProductForm()">+ Yeni ürün</button>`,
     html:`<div class="card flat" style="margin-top:8px">${rows || emptyBox('Henüz ürün yok', 'Sık sattığınız ürünleri ekleyin; veresiye eklerken fiyat otomatik dolsun.')}</div>
       <p class="help">Ürün fiyatını değiştirmek geçmiş kayıtları etkilemez.</p>`};
+}
+function unpaidDebtsFor(pname){
+  return db.transactions.filter(t => t.type === 'debt' && t.product === pname).filter(t => {
+    const lastPay = db.transactions.filter(x => x.customerId === t.customerId && x.type === 'payment').reduce((m, x) => x.date > m ? x.date : m, '');
+    return !(lastPay && lastPay >= t.date);
+  });
+}
+function custNameOf(t){ const c = db.customers.find(x => x.id === t.customerId); return c ? c.name : ''; }
+function openRepriceSheet(pid){
+  if(!db.products.length){ toast('Önce bir ürün ekleyin'); return; }
+  const sel = pid || db.products[0].id;
+  openSheet('Borçları yeni fiyata güncelle', `
+    <p class="help" style="margin-top:0">Ürün fiyatını değiştirdiyseniz, müşterinin henüz ödemediği eski fiyatlı veresiyeleri buradan yeni fiyata çevirebilirsiniz. Müşteri o kayıttan sonra ödeme yaptıysa kayıt listede çıkmaz.</p>
+    <label class="lbl">Ürün</label>
+    <select class="inp" id="rp-prod" onchange="renderReprice()">${db.products.map(p => `<option value="${p.id}" ${p.id === sel ? 'selected' : ''}>${esc(p.name)} (${money(p.price)})</option>`).join('')}</select>
+    <div id="rp-list" style="margin-top:14px"></div>`,
+    `<button class="btn" onclick="closeSheet()">Vazgeç</button>
+     <button class="btn primary" id="rp-go" onclick="applyReprice()">Seçilenleri güncelle</button>`);
+  renderReprice();
+}
+function renderReprice(){
+  const p = db.products.find(x => x.id === $('#rp-prod').value);
+  if(!p) return;
+  const list = unpaidDebtsFor(p.name).filter(t => t.price !== p.price)
+    .sort((a, b) => custNameOf(a).localeCompare(custNameOf(b), 'tr') || a.date.localeCompare(b.date));
+  $('#rp-list').innerHTML = list.length
+    ? `<div class="card flat">${list.map(t => `<label class="row click">
+        <input type="checkbox" class="rp" value="${t.id}" checked onchange="repriceSum()" style="width:18px;height:18px;flex:none">
+        <div class="grow"><div class="t1">${esc(custNameOf(t))}</div><div class="t2">${fmtDate(t.date)} · ${t.qty} ${esc(t.unit || '')} × ${money(t.price)} → ${money(p.price)}</div></div>
+        <div class="amt">${money(t.qty * p.price)}</div></label>`).join('')}</div>
+      <div class="help" id="rp-sum"></div>`
+    : emptyBox('Güncellenecek kayıt yok', 'Bu ürün için ödenmemiş, eski fiyatlı veresiye bulunmuyor.');
+  repriceSum();
+}
+function repriceSum(){
+  const p = db.products.find(x => x.id === $('#rp-prod').value);
+  const ids = [...document.querySelectorAll('.rp:checked')].map(x => x.value);
+  const ts = db.transactions.filter(t => ids.includes(t.id));
+  const diff = ts.reduce((s, t) => s + (t.qty * p.price - t.kurus / 100), 0);
+  if($('#rp-sum')) $('#rp-sum').textContent = `${ts.length} kayıt seçili · toplam fark ${money(diff)}`;
+  if($('#rp-go')) $('#rp-go').disabled = ts.length === 0;
+}
+function applyReprice(){
+  const p = db.products.find(x => x.id === $('#rp-prod').value);
+  const ids = [...document.querySelectorAll('.rp:checked')].map(x => x.value);
+  const ts = db.transactions.filter(t => ids.includes(t.id));
+  if(!p || !ts.length) return;
+  const today = ymd(new Date());
+  ts.forEach(t => { t.oldPrice = t.price; t.price = p.price; t.kurus = Math.round(t.qty * p.price * 100); t.repriced = today; });
+  save(); closeSheet(); toast(`${ts.length} borç yeni fiyata çevrildi`); render();
 }
 function openProductForm(id){
   const p = id ? db.products.find(x => x.id === id) : null;
@@ -1191,11 +1255,7 @@ function deleteProduct(id){
 /* ---------- siparişler ---------- */
 const WD = ['Pazar','Pazartesi','Salı','Çarşamba','Perşembe','Cuma','Cumartesi'];
 const weekdayName = d => WD[new Date(d + 'T00:00:00').getDay()];
-function dayLabel(d){
-  if(d === ymd(new Date())) return `Bugün · ${fmtDate(d)}`;
-  if(d === ymdOffset(1)) return `Yarın · ${fmtDate(d)}`;
-  return `${weekdayName(d)} · ${fmtDate(d)}`;
-}
+function dayLabel(d){ return `${weekdayName(d)} · ${fmtDate(d)}`; }
 function openOrders(){
   return db.orders
     .filter(o => o.status === 'open' && db.customers.some(c => c.id === o.customerId))
@@ -1210,21 +1270,80 @@ function orderRowHTML(o){
     <div class="ord-r"><div class="t1">${esc(o.product)} · ${o.qty} ${esc(o.unit || '')}</div><div class="t2">${dayLabel(o.deliveryDate)}</div></div>
   </div>`;
 }
-function viewOrders(){
-  const open = openOrders();
-  const groups = {};
-  open.forEach(o => (groups[o.deliveryDate] ||= []).push(o));
-  const body = Object.keys(groups).sort().map(d =>
-    `<div class="h2">${dayLabel(d)}</div><div class="card flat">${groups[d].map(orderRowHTML).join('')}</div>`).join('');
+function custName(o){ const c = db.customers.find(x => x.id === o.customerId); return c ? c.name : ''; }
+function visibleOrders(){
+  const oday = ui.oday || 'all';
+  let list = openOrders();
+  if(oday !== 'all') list = list.filter(o => o.deliveryDate === oday);
+  const q = (ui.oq || '').trim().toLocaleLowerCase('tr');
+  if(q) list = list.filter(o => custName(o).toLocaleLowerCase('tr').includes(q) || o.product.toLocaleLowerCase('tr').includes(q));
+  const cmp = {
+    name: (a, b) => custName(a).localeCompare(custName(b), 'tr'),
+    product: (a, b) => a.product.localeCompare(b.product, 'tr'),
+    added: (a, b) => (a.createdAt || 0) - (b.createdAt || 0)
+  }[ui.osort || 'name'];
+  return list.sort((a, b) => a.deliveryDate.localeCompare(b.deliveryDate) || cmp(a, b));
+}
+function ordersSub(){
+  const oday = ui.oday || 'all';
+  const n = visibleOrders().length;
+  return `${n} sipariş${oday !== 'all' ? ' · ' + dayLabel(oday) : ' · açık'}`;
+}
+function ordersListHTML(){
+  const oday = ui.oday || 'all';
+  const list = visibleOrders();
+  let body = '';
+  if(oday !== 'all'){
+    if(list.length) body = `<div class="h2">${dayLabel(oday)}</div><div class="card flat">${list.map(orderRowHTML).join('')}</div>`;
+  } else {
+    const groups = {};
+    list.forEach(o => (groups[o.deliveryDate] ||= []).push(o));
+    body = Object.keys(groups).sort().map(d =>
+      `<div class="h2">${dayLabel(d)}</div><div class="card flat">${groups[d].map(orderRowHTML).join('')}</div>`).join('');
+  }
   const done = db.orders.filter(o => o.status === 'done' && db.customers.some(c => c.id === o.customerId))
     .sort((a, b) => (b.doneAt || '').localeCompare(a.doneAt || '')).slice(0, 8);
+  const searching = !!(ui.oq || '').trim();
+  return (list.length ? body : `<div class="card flat">${emptyBox(
+      searching ? 'Aramayla eşleşen sipariş yok' : 'Bu günde sipariş yok',
+      searching ? 'Farklı bir ad ya da ürün deneyin.' : 'Müşteri sipariş verdiğinde ürünü ve teslim gününü kaydedin.')}</div>`)
+    + (done.length && !searching ? `<div class="h2">Teslim edilenler</div><div class="card flat">${done.map(orderRowHTML).join('')}</div>` : '');
+}
+function viewOrders(){
+  const oday = ui.oday || 'all';
+  const dayBtns = [`<button class="${oday === 'all' ? 'on' : ''}" onclick="ui.oday='all';render()">Tümü</button>`]
+    .concat([0,1,2,3,4,5,6].map(i => {
+      const d = ymdOffset(i);
+      return `<button class="${oday === d ? 'on' : ''}" onclick="ui.oday='${d}';render()">${WD[new Date(d + 'T00:00:00').getDay()]}</button>`;
+    })).join('');
   return {
     title:'Siparişler',
-    sub:`${open.length} açık sipariş`,
+    sub: ordersSub(),
     actions:`<button class="btn primary" onclick="openOrderForm()">+ Sipariş ekle</button>`,
-    html: (open.length ? body : `<div class="card flat" style="margin-top:8px">${emptyBox('Açık sipariş yok', 'Müşteri sipariş verdiğinde ürünü ve teslim gününü kaydedin.')}</div>`)
-      + (done.length ? `<div class="h2">Teslim edilenler</div><div class="card flat">${done.map(orderRowHTML).join('')}</div>` : '')
+    html: `
+    <div class="toolbar">
+      <div class="seg" data-seg="oday"><span class="sind"></span>${dayBtns}</div>
+      <select class="inp" onchange="ui.osort=this.value;render()">${[['name','Müşteri adına göre'],['product','Ürüne göre'],['added','Eklenme sırasına göre']].map(([k, l]) =>
+        `<option value="${k}" ${(ui.osort || 'name') === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <button class="btn" onclick="printOrders()">Yazdır</button>
+    </div>
+    <div id="olist">${ordersListHTML()}</div>`
   };
+}
+function printOrders(){
+  const list = visibleOrders();
+  if(!list.length){ toast('Yazdırılacak sipariş yok'); return; }
+  const all = (ui.oday || 'all') === 'all';
+  const rows = list.map((o, i) => {
+    const c = db.customers.find(x => x.id === o.customerId) || {};
+    return `<tr><td>${i + 1}</td>${all ? `<td>${dayLabel(o.deliveryDate)}</td>` : ''}<td>${esc(c.name || '')}</td><td>${esc(c.phone || '')}</td><td>${esc(c.address || '')}</td>
+      <td>${esc(o.product)}</td><td>${o.qty} ${esc(o.unit || '')}</td><td>${esc([o.note, c.note].filter(Boolean).join(' · '))}</td><td class="ck"></td></tr>`;
+  }).join('');
+  $('#print-root').innerHTML = `<h1>Teslimat listesi</h1>
+    <p>${all ? 'Tüm açık siparişler' : esc(dayLabel(ui.oday))} · ${list.length} sipariş · Yazdırıldı: ${fmtDate(ymd(new Date()))}</p>
+    <table><thead><tr><th>No</th>${all ? '<th>Teslim</th>' : ''}<th>Müşteri</th><th>Telefon</th><th>Adres</th><th>Ürün</th><th>Miktar</th><th>Not</th><th>✓</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+  window.print();
 }
 function openOrderMenu(id){
   const o = db.orders.find(x => x.id === id);
@@ -1256,6 +1375,7 @@ function openOrderForm(id, cid){
   }).join('');
   openSheet(o ? 'Siparişi düzenle' : 'Yeni sipariş', `
     <label class="lbl">Müşteri</label>
+    <input class="inp" id="o-cq" placeholder="Müşteri adı veya telefonla ara" oninput="filterOrderCustomers(this.value)" style="margin-bottom:8px">
     <select class="inp" id="o-cid">${custOpts}</select>
     <label class="lbl">Teslim günü</label>
     <div class="pills" id="odays">${days}</div>
@@ -1273,6 +1393,17 @@ function openOrderForm(id, cid){
     <div class="err" id="oerr"></div>`,
     `<button class="btn" onclick="closeSheet()">Vazgeç</button>
      <button class="btn primary" onclick="saveOrder('${id || ''}')">Siparişi kaydet</button>`);
+}
+function filterOrderCustomers(q){
+  const sel = $('#o-cid');
+  const cur = sel.value;
+  const t = q.trim().toLocaleLowerCase('tr');
+  const list = db.customers
+    .filter(c => c.name.toLocaleLowerCase('tr').includes(t) || (c.phone || '').replace(/\s/g, '').includes(t.replace(/\s/g, '')))
+    .sort((a, b) => a.name.localeCompare(b.name, 'tr'));
+  sel.innerHTML = list.length
+    ? list.map(c => `<option value="${c.id}" ${c.id === cur ? 'selected' : ''}>${esc(c.name)}${c.phone ? ' · ' + esc(c.phone) : ''}</option>`).join('')
+    : '<option value="">Bulunamadı</option>';
 }
 function setOrderDay(d){
   $('#o-date').value = d;
@@ -1401,46 +1532,7 @@ function viewReports(){
 }
 
 /* ---------- ayarlar ---------- */
-const SIM_FIRST=['Ahmet','Mehmet','Ali','Hasan','Hüseyin','Mustafa','Fatma','Ayşe','Emine','Zeynep','Hatice','Elif','İbrahim','Yusuf','Kadir','Süleyman','Hanife','Sevim'];
-const SIM_LAST=['Yılmaz','Kaya','Demir','Şahin','Çelik','Aydın','Özdemir','Arslan','Doğan','Koç','Kurt','Güneş'];
-const SIM_PRODUCTS=[['Büyükbaş yem',750,'çuval'],['Küçükbaş yem',690,'çuval'],['Tavuk yemi',520,'çuval'],['Mısır',18.5,'kg'],['Arpa',14,'kg'],['Buğday kepeği',260,'çuval'],['Ayçiçeği tohumu',95,'kg']];
-const simPick = a => a[Math.floor(Math.random() * a.length)];
-const simRnd = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
 const ymdOffset = d => { const x = new Date(); x.setDate(x.getDate() + d); return ymd(x); };
-function simSeed(){
-  if(db.customers.some(c => c.sim)) return toast('Test verisi zaten var; önce silin');
-  const prods = SIM_PRODUCTS.map(([n, p, u]) => ({id:uid(), name:n, price:p, unit:u, sim:true}));
-  db.products.push(...prods);
-  const names = new Set();
-  while(names.size < 14) names.add(simPick(SIM_FIRST) + ' ' + simPick(SIM_LAST));
-  let n = 0;
-  names.forEach(name => {
-    const c = {id:uid(), name, phone:'05' + simRnd(30, 59) + ' ' + simRnd(100, 999) + ' ' + simRnd(10, 99) + ' ' + simRnd(10, 99), address:'', note:'', createdAt:Date.now(), sim:true};
-    db.customers.push(c);
-    let bal = 0;
-    for(let i = simRnd(0, 4); i > 0; i--){
-      const p = simPick(prods), qty = simRnd(1, 8);
-      const t = {id:uid(), customerId:c.id, type:'debt', date:ymdOffset(-simRnd(0, 60)), product:p.name, qty, unit:p.unit, price:p.price, kurus:Math.round(qty * p.price * 100), method:'', note:'', createdAt:Date.now() + n++, sim:true};
-      db.transactions.push(t); bal += t.kurus;
-    }
-    if(bal > 0 && Math.random() < 0.6){
-      db.transactions.push({id:uid(), customerId:c.id, type:'payment', date:ymdOffset(-simRnd(0, 20)), product:'', qty:0, unit:'', price:0, kurus:Math.round(bal * simRnd(10, 70) / 100), method:simPick(['Nakit','Havale/EFT','Kart']), note:'Borçtan ödeme', createdAt:Date.now() + n++, sim:true});
-    }
-  });
-  save(); toast('14 test müşterisi eklendi'); render();
-}
-function simClear(){
-  const simCusts = db.customers.filter(c => c.sim);
-  const ids = new Set(simCusts.map(c => c.id));
-  if(!ids.size && !db.products.some(p => p.sim)) return toast('Silinecek test verisi yok');
-  simCusts.forEach(c => trackDeletion('customers', c.id));
-  db.transactions.filter(t => t.sim || ids.has(t.customerId)).forEach(t => trackDeletion('transactions', t.id));
-  db.products.filter(p => p.sim).forEach(p => trackDeletion('products', p.id));
-  db.customers = db.customers.filter(c => !c.sim);
-  db.transactions = db.transactions.filter(t => !t.sim && !ids.has(t.customerId));
-  db.products = db.products.filter(p => !p.sim);
-  save(); toast('Test verileri silindi'); render();
-}
 function viewSettings(){
   const s = db.settings;
   const simCount = db.customers.filter(c => c.sim).length;
@@ -1497,7 +1589,7 @@ function viewSettings(){
             </div>
           </section>
         </div>
-        <section class="card">
+        <section class="card" style="margin-top:16px">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
             <h3 style="margin:0;font-size:16px">🌐 Canlı Senkronizasyon & Bulut Sunucusu</h3>
             <span class="badge ${syncEngine.status === 'connected' ? 'green' : 'amber'}">${syncEngine.getLabel()}</span>
@@ -1509,13 +1601,7 @@ function viewSettings(){
             <button class="btn" onclick="syncEngine.push(db); toast('Sunucuya gönderildi');">Bu Cihazı Sunucuya Gönder</button>
           </div>
         </section>
-        <section class="card">
-          <h3 style="margin:0 0 4px;font-size:16px">Simülasyon (test)</h3>
-          <p class="help" style="margin-bottom:12px">Ekranın nasıl göründüğünü denemek için 14 örnek müşteri, borç ve ödeme ekler. Bunlar ayrı işaretlenir; "Test verilerini sil" yalnızca onları siler, sizin kayıtlarınıza dokunmaz.</p>
-          <p class="help" style="margin-bottom:12px">Şu an ${simCount} test müşterisi var.</p>
-          <div class="btns"><button class="btn primary" onclick="simSeed()">Test verisi ekle</button><button class="btn danger" onclick="simClear()">Test verilerini sil</button></div>
-        </section>
-      </div>
+</div>
     </div>`};
 }
 function setPreview(){
